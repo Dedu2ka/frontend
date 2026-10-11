@@ -1,0 +1,22 @@
+# Секреты и подпись
+*.jks
+*.keystore
+keystore.properties
+local.properties
+google-services.json
+
+# IDE
+.idea/
+*.iml
+
+# Сборка
+.gradle/
+build/
+/captures
+.externalNativeBuild
+.cxx
+*.apk
+*.aab
+app/release/
+
+.DS_Store
