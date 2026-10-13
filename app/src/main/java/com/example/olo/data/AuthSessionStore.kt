@@ -15,7 +15,8 @@ import javax.crypto.spec.GCMParameterSpec
 data class AuthSession(
     val username: String,
     val userId: String,
-    val token: String
+    val token: String,
+    val refreshToken: String? = null
 )
 
 class AuthSessionStore(context: Context) {
@@ -26,6 +27,7 @@ class AuthSessionStore(context: Context) {
             .put("username", session.username)
             .put("userId", session.userId)
             .put("token", session.token)
+            .put("refreshToken", session.refreshToken)
             .toString()
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
@@ -41,7 +43,7 @@ class AuthSessionStore(context: Context) {
         val token = stored.optString("token").takeIf { it.isNotBlank() } ?: return null
         val userId = stored.optString("userId").takeIf { it.isNotBlank() } ?: return null
         val username = stored.optString("username").takeIf { it.isNotBlank() } ?: return null
-        return AuthSession(username = username, userId = userId, token = token)
+        return AuthSession(username = username, userId = userId, token = token, refreshToken = stored.opt("refreshToken")?.toString()?.takeIf { it.isNotBlank() && it != "null" })
     }
 
     fun readSavedUsername(): String? =

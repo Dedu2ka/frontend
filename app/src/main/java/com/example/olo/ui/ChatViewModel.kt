@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.olo.data.ApiService
 import com.example.olo.data.ChatDto
 import com.example.olo.data.ChatWebSocketClient
+import com.example.olo.data.ConnectionStatus
 import com.example.olo.data.MessageDto
 import com.example.olo.data.OutboxResult
 import com.example.olo.data.PendingMessageDao
@@ -40,9 +41,15 @@ class ChatViewModel(
     val activeChatId: StateFlow<String?> = _activeChatId
     private val _chatVisible = MutableStateFlow(false)
     private val _messages = MutableStateFlow<List<MessageDto>>(emptyList())
+    private val _hasOlderMessages = MutableStateFlow(false)
+    val hasOlderMessages: StateFlow<Boolean> = _hasOlderMessages
+    private val _loadingOlderMessages = MutableStateFlow(false)
+    val loadingOlderMessages: StateFlow<Boolean> = _loadingOlderMessages
     val messages: StateFlow<List<MessageDto>> = _messages
     private val _chats = MutableStateFlow<List<ChatDto>>(emptyList())
     val chats: StateFlow<List<ChatDto>> = _chats
+    private val _connectionStatus = MutableStateFlow(ConnectionStatus.DISCONNECTED)
+    val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus
     private val _errorState = MutableStateFlow<String?>(null)
     val errorState: StateFlow<String?> = _errorState
 
@@ -58,6 +65,8 @@ class ChatViewModel(
     private var pendingRecipientId: String? = null
     private val outboxMutex = Mutex()
     private var activeToken: String = ""
+    @Volatile private var webSocketConnected = false
+    @Volatile private var lastSuccessfulApiAtMillis = 0L
 
     // Замена Instant.now() (требует API 26, а minSdk = 24)
     private fun nowUtcIso(): String =
@@ -68,6 +77,7 @@ class ChatViewModel(
     fun startSession(userToken: String, userId: String) {
         val sessionChanged = activeUserId != userId || activeToken != userToken || !sessionJob.isActive
         if (sessionChanged) {
+            lastSuccessfulApiAtMillis = 0L
             realtimeSyncJob?.cancel()
             realtimeSyncJob = null
             sessionJob.cancel()
@@ -80,6 +90,7 @@ class ChatViewModel(
                 _chatVisible.value = false
                 pendingRecipientId = null
                 _messages.value = emptyList()
+                _hasOlderMessages.value = false
                 _chats.value = emptyList()
             }
             activeToken = userToken
@@ -101,8 +112,11 @@ class ChatViewModel(
         _chatVisible.value = false
         pendingRecipientId = null
         _messages.value = emptyList()
+        _hasOlderMessages.value = false
         _chats.value = emptyList()
         _errorState.value = null
+        _connectionStatus.value = ConnectionStatus.DISCONNECTED
+        lastSuccessfulApiAtMillis = 0L
     }
 
     fun onHostResumed() {
@@ -120,10 +134,30 @@ class ChatViewModel(
         if (realtimeSyncJob?.isActive == true) return
         realtimeSyncJob = sessionScope.launch {
             while (isActive) {
-                synchronizeVisibleData()
-                delay(2_000)
+                if (webSocketConnected) {
+                    flushPendingMessages()
+                    delay(30_000)
+                } else {
+                    synchronizeVisibleData()
+                    delay(15_000)
+                }
             }
         }
+    }
+
+    private fun markServerReachable() {
+        lastSuccessfulApiAtMillis = System.currentTimeMillis()
+        if (!webSocketConnected && activeUserId != null) {
+            _connectionStatus.value = ConnectionStatus.SERVER_AVAILABLE
+        }
+    }
+
+    private fun effectiveConnectionStatus(status: ConnectionStatus): ConnectionStatus {
+        webSocketConnected = status == ConnectionStatus.CONNECTED
+        val recentApiSuccess = System.currentTimeMillis() - lastSuccessfulApiAtMillis < 30_000
+        return if (!webSocketConnected && recentApiSuccess &&
+            (status == ConnectionStatus.ERROR || status == ConnectionStatus.RECONNECTING)
+        ) ConnectionStatus.SERVER_AVAILABLE else status
     }
 
     private suspend fun synchronizeVisibleData() {
@@ -148,6 +182,7 @@ class ChatViewModel(
             val response = apiService.getUserChats(authToken, userId)
             val chats = response.body()
             if (response.isSuccessful && chats != null) {
+                markServerReachable()
                 _chats.value = chats
                 if (reportErrors) _errorState.value = null
             } else {
@@ -169,9 +204,10 @@ class ChatViewModel(
                 Log.e("ChatViewModel", "Ошибка синхронизации сообщений: HTTP ${response.code()}")
                 return
             }
+            markServerReachable()
             val latestMessages = response.body() ?: return
             val oldIds = _messages.value.asSequence().map { it.id }.toHashSet()
-            _messages.value = latestMessages
+            _messages.value = mergeMessages(_messages.value, latestMessages)
 
             val hasNewIncoming = latestMessages.any {
                 it.senderId != userId && it.id !in oldIds
@@ -180,7 +216,7 @@ class ChatViewModel(
                 val readResponse = apiService.markChatRead(authToken, chatId)
                 if (readResponse.isSuccessful) {
                     val refreshed = apiService.getMessages(authToken, chatId)
-                    if (refreshed.isSuccessful) _messages.value = refreshed.body().orEmpty()
+                    if (refreshed.isSuccessful) _messages.value = mergeMessages(_messages.value, refreshed.body().orEmpty())
                 }
             }
         } catch (e: Exception) {
@@ -228,7 +264,7 @@ class ChatViewModel(
                 }
 
                 pendingRecipientId = null
-                if (_activeChatId.value != chat.id) _messages.value = emptyList()
+                if (_activeChatId.value != chat.id) { _messages.value = emptyList(); _hasOlderMessages.value = false }
                 _activeChatId.value = chat.id
                 _chatVisible.value = true
                 onChatReady(
@@ -255,7 +291,7 @@ class ChatViewModel(
 
     fun openChat(userToken: String, userId: String, chatId: String) {
         val authToken = bearer(userToken)
-        if (_activeChatId.value != chatId) _messages.value = emptyList()
+        if (_activeChatId.value != chatId) { _messages.value = emptyList(); _hasOlderMessages.value = false }
         pendingRecipientId = null
         _activeChatId.value = chatId
         _chatVisible.value = true
@@ -278,21 +314,43 @@ class ChatViewModel(
         try {
             val res = apiService.getMessages(authToken, chatId)
             if (res.isSuccessful && res.body() != null) {
+                markServerReachable()
                 val senderId = activeUserId
+                _hasOlderMessages.value = res.body().orEmpty().size >= 50
                 val pending = if (senderId == null) emptyList() else {
                     outbox.pendingFor(senderId)
                         .filter { it.chatId == chatId }
                         .map(outbox::toMessageDto)
                 }
-                _messages.value = (res.body().orEmpty() + pending)
-                    .distinctBy { it.id }
-                    .sortedBy { it.timestamp.orEmpty() }
+                _messages.value = mergeMessages(_messages.value, res.body().orEmpty() + pending)
             } else Log.e("ChatViewModel", "Ошибка загрузки сообщений: ${res.code()}")
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Log.e("ChatViewModel", "Исключение при загрузке сообщений", e)
         }
     }
+
+    fun loadOlderMessages(userToken: String, chatId: String) {
+        if (!_hasOlderMessages.value || _loadingOlderMessages.value) return
+        val cursor = _messages.value.firstOrNull()?.id ?: return
+        _loadingOlderMessages.value = true
+        sessionScope.launch {
+            try {
+                val response = apiService.getMessages(bearer(userToken), chatId, cursor, 50)
+                if (response.isSuccessful) {
+                    val page = response.body().orEmpty()
+                    _hasOlderMessages.value = page.size >= 50
+                    _messages.value = mergeMessages(_messages.value, page)
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.e("ChatViewModel", "Не удалось загрузить старые сообщения", e)
+            } finally { _loadingOlderMessages.value = false }
+        }
+    }
+
+    private fun mergeMessages(existing: List<MessageDto>, incoming: List<MessageDto>): List<MessageDto> =
+        (existing + incoming).distinctBy { it.id }.sortedBy { it.timestamp.orEmpty() }
 
     private suspend fun restorePendingChatMessages(senderId: String, chatId: String) {
         val pending = outbox.pendingFor(senderId)
@@ -357,7 +415,8 @@ class ChatViewModel(
     private fun connectWebSocket(userToken: String) {
         webSocketClient?.disconnect()
         val connectionSession = sessionJob
-        webSocketClient = ChatWebSocketClient(
+        lateinit var client: ChatWebSocketClient
+        client = ChatWebSocketClient(
             apiService,
             userToken,
             onEvent = { event ->
@@ -369,8 +428,15 @@ class ChatViewModel(
                 if (sessionJob === connectionSession && connectionSession.isActive) {
                     synchronizeAfterWebSocketConnect()
                 }
+            },
+            onConnectionChanged = { status ->
+                if (webSocketClient === client && sessionJob === connectionSession && connectionSession.isActive) {
+                    _connectionStatus.value = effectiveConnectionStatus(status)
+                }
             }
-        ).also { it.connect() }
+        )
+        webSocketClient = client
+        client.connect()
     }
 
     private fun synchronizeAfterWebSocketConnect() {
@@ -383,6 +449,7 @@ class ChatViewModel(
     fun disconnectWebSocket() {
         webSocketClient?.disconnect()
         webSocketClient = null
+        webSocketConnected = false
     }
 
     private fun handleWebSocketEvent(event: WsPayload) {

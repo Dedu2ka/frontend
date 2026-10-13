@@ -67,7 +67,7 @@ internal fun AuthFormScreen(
             Spacer(Modifier.height(6.dp))
             OutlinedTextField(
                 value = username,
-                onValueChange = { username = it; validationError = null },
+                onValueChange = { username = it.filterNot(Char::isWhitespace); validationError = null },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
                 singleLine = true,
@@ -79,7 +79,7 @@ internal fun AuthFormScreen(
             Spacer(Modifier.height(6.dp))
             OutlinedTextField(
                 value = password,
-                onValueChange = { password = it; validationError = null },
+                onValueChange = { password = it.filterNot(Char::isWhitespace); validationError = null },
                 visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
                     TextButton(onClick = { passwordVisible = !passwordVisible }) {

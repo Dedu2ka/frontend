@@ -30,12 +30,22 @@ data class WsPayload(
     val clientMessageId: String? = null
 )
 
+enum class ConnectionStatus {
+    CONNECTING,
+    CONNECTED,
+    SERVER_AVAILABLE,
+    RECONNECTING,
+    ERROR,
+    DISCONNECTED
+}
+
 class ChatWebSocketClient(
     private val apiService: ApiService,
     private val token: String,
     private val onEvent: (WsPayload) -> Unit,
     private val baseUrl: String = BuildConfig.BASE_URL,
-    private val onConnected: () -> Unit = {}
+    private val onConnected: () -> Unit = {},
+    private val onConnectionChanged: (ConnectionStatus) -> Unit = {}
 ) {
     private var webSocket: WebSocket? = null
     private val client = OkHttpClient.Builder()
@@ -45,12 +55,15 @@ class ChatWebSocketClient(
     private val gson = Gson()
     @Volatile private var stopped = false
     @Volatile private var connecting = false
+    @Volatile private var socketConnected = false
     @Volatile private var retryAttempt = 0
     private var reconnectJob: Job? = null
+    private var connectTimeoutJob: Job? = null
 
     @Synchronized
     fun connect() {
         if (stopped || connecting || webSocket != null) return
+        onConnectionChanged(if (retryAttempt == 0) ConnectionStatus.CONNECTING else ConnectionStatus.RECONNECTING)
         connecting = true
         scope.launch {
             try {
@@ -58,6 +71,7 @@ class ChatWebSocketClient(
                 val ticket = response.body()?.ticket
                 if (!response.isSuccessful || ticket.isNullOrBlank()) {
                     Log.e("WS", "Не удалось получить ticket: HTTP ${response.code()}")
+                    onConnectionChanged(ConnectionStatus.ERROR)
                     scheduleReconnect()
                     return@launch
                 }
@@ -69,16 +83,22 @@ class ChatWebSocketClient(
                     .addQueryParameter("ticket", ticket)
                     .build()
 
-                webSocket = client.newWebSocket(
+                val socket = client.newWebSocket(
                     Request.Builder().url(socketUrl).build(),
                     object : WebSocketListener() {
                         override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                            if (stopped || this@ChatWebSocketClient.webSocket !== webSocket) return
+                            socketConnected = true
+                            connectTimeoutJob?.cancel()
+                            connectTimeoutJob = null
                             retryAttempt = 0
                             Log.d("WS", "Успешное подключение к backend")
+                            onConnectionChanged(ConnectionStatus.CONNECTED)
                             onConnected()
                         }
 
                         override fun onMessage(webSocket: WebSocket, text: String) {
+                            if (stopped || this@ChatWebSocketClient.webSocket !== webSocket) return
                             runCatching { gson.fromJson(text, WsPayload::class.java) }
                                 .onSuccess { onEvent(it) }
                                 .onFailure { Log.e("WS", "Ошибка разбора WebSocket-события", it) }
@@ -89,22 +109,45 @@ class ChatWebSocketClient(
                             t: Throwable,
                             response: okhttp3.Response?
                         ) {
+                            if (stopped || this@ChatWebSocketClient.webSocket !== webSocket) return
+                            socketConnected = false
+                            connectTimeoutJob?.cancel()
+                            connectTimeoutJob = null
                             this@ChatWebSocketClient.webSocket = null
+                            onConnectionChanged(ConnectionStatus.RECONNECTING)
                             Log.e("WS", "Ошибка соединения: ${t.message}", t)
                             scheduleReconnect()
                         }
 
                         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                            if (stopped || this@ChatWebSocketClient.webSocket !== webSocket) return
+                            socketConnected = false
+                            connectTimeoutJob?.cancel()
+                            connectTimeoutJob = null
                             this@ChatWebSocketClient.webSocket = null
-                            if (!stopped) {
-                                Log.w("WS", "Соединение закрыто ($code): $reason")
-                                scheduleReconnect()
-                            }
+                            onConnectionChanged(ConnectionStatus.RECONNECTING)
+                            Log.w("WS", "Соединение закрыто ($code): $reason")
+                            scheduleReconnect()
                         }
                     }
                 )
+                webSocket = socket
+                connectTimeoutJob?.cancel()
+                connectTimeoutJob = scope.launch {
+                    delay(15_000)
+                    synchronized(this@ChatWebSocketClient) {
+                        if (!stopped && !socketConnected && this@ChatWebSocketClient.webSocket === socket) {
+                            Log.e("WS", "Тайм-аут подключения WebSocket")
+                            this@ChatWebSocketClient.webSocket = null
+                            onConnectionChanged(ConnectionStatus.RECONNECTING)
+                            socket.cancel()
+                            scheduleReconnect()
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 Log.e("WS", "Ошибка получения WebSocket ticket", e)
+                onConnectionChanged(ConnectionStatus.ERROR)
                 scheduleReconnect()
             } finally {
                 connecting = false
@@ -115,8 +158,12 @@ class ChatWebSocketClient(
     @Synchronized
     fun disconnect() {
         stopped = true
+        socketConnected = false
+        onConnectionChanged(ConnectionStatus.DISCONNECTED)
         reconnectJob?.cancel()
         reconnectJob = null
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = null
         webSocket?.close(1000, "Chat closed")
         webSocket = null
         scope.cancel()

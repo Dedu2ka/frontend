@@ -19,7 +19,7 @@ class AccountRepository(
         authenticate(register = true, username = username, password = password)
 
     private suspend fun authenticate(register: Boolean, username: String, password: String): AccountResult {
-        val request = AuthRequest(username, password)
+        val request = AuthRequest(username.trim(), password.trim())
         val response = if (register) api.register(request) else api.login(request)
         if (!response.isSuccessful) {
             return AccountResult.Rejected(authenticationError(register, response))
@@ -27,7 +27,7 @@ class AccountRepository(
 
         val body = response.body()
             ?: return AccountResult.Rejected("Сервер не вернул данные аккаунта")
-        val session = AuthSession(body.username, body.userId, body.token)
+        val session = AuthSession(body.username, body.userId, body.token, body.refreshToken)
         sessionStore.saveSession(session)
         return AccountResult.Authenticated(session)
     }

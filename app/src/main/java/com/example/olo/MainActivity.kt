@@ -48,7 +48,7 @@ enum class Screen { LOADING, LOGIN, REGISTER, SEARCH, CHAT, SETTINGS }
 
 class MainActivity : ComponentActivity() {
 
-    private val apiService by lazy { ApiService.create() }
+    private val apiService by lazy { ApiService.create(applicationContext) }
     private val authSessionStore by lazy { AuthSessionStore(applicationContext) }
     private val accountRepository by lazy { AccountRepository(apiService, authSessionStore) }
     private val userRepository by lazy { UserRepository(apiService) }
@@ -97,6 +97,7 @@ class MainActivity : ComponentActivity() {
                     var searchResults by remember { mutableStateOf(emptyList<UserItem>()) }
 
                     val chatListState by chatViewModel.chats.collectAsState()
+                    val connectionStatus by chatViewModel.connectionStatus.collectAsState()
                     val chatErrorState by chatViewModel.errorState.collectAsState()
                     val activeChatIdState by chatViewModel.activeChatId.collectAsState()
 
@@ -190,10 +191,11 @@ class MainActivity : ComponentActivity() {
                     fun logout() {
                         chatViewModel.endSession()
                         val tokenToRevoke = userToken
+                        val refreshTokenToRevoke = authSessionStore.readSession()?.refreshToken
                         if (tokenToRevoke.isNotBlank()) unregisterPushToken(tokenToRevoke)
                         if (tokenToRevoke.isNotBlank()) {
                             scope.launch {
-                                runCatching { apiService.logout("Bearer $tokenToRevoke") }
+                                runCatching { apiService.logout("Bearer $tokenToRevoke", com.example.olo.data.LogoutRequest(refreshTokenToRevoke)) }
                             }
                         }
                         userToken = ""
@@ -303,6 +305,8 @@ class MainActivity : ComponentActivity() {
                         Screen.SEARCH -> SearchScreen(
                             userList = searchResults,
                             chatList = chatListState,
+                            currentUserId = currentUserId,
+                            connectionStatus = connectionStatus,
                             onSearchQueryChange = { query ->
                                 scope.launch {
                                     try {
@@ -370,6 +374,8 @@ class MainActivity : ComponentActivity() {
 
                         Screen.CHAT -> {
                             val messagesState by chatViewModel.messages.collectAsState()
+                            val hasOlderMessages by chatViewModel.hasOlderMessages.collectAsState()
+                            val loadingOlderMessages by chatViewModel.loadingOlderMessages.collectAsState()
 
                             val uiMessages = messagesState.map { msg ->
                                 MessageUiItem(
@@ -386,6 +392,7 @@ class MainActivity : ComponentActivity() {
                                 chatPartnerName = activeChatName,
                                 chatPartnerAvatarUrl = activeChatAvatarUrl,
                                 messages = uiMessages,
+                                connectionStatus = connectionStatus,
                                 onSendMessage = { newMsgText ->
                                     chatViewModel.sendMessage(
                                         userToken = userToken,
@@ -393,6 +400,9 @@ class MainActivity : ComponentActivity() {
                                         content = newMsgText
                                     )
                                 },
+                                hasOlderMessages = hasOlderMessages,
+                                loadingOlderMessages = loadingOlderMessages,
+                                onLoadOlderMessages = { chatViewModel.loadOlderMessages(userToken, chatViewModel.activeChatId.value ?: "") },
                                 onNavigateToSettings = { navigateTo(Screen.SETTINGS) },
                                 onNavigateToSearch = {
                                     chatViewModel.loadUserChats(userToken, currentUserId)

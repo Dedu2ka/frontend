@@ -38,7 +38,7 @@ class OloFirebaseMessagingService : FirebaseMessagingService() {
         CoroutineScope(Dispatchers.IO).launch {
             val session = AuthSessionStore(applicationContext).readSession() ?: return@launch
             runCatching {
-                ApiService.create().registerPushToken(
+                ApiService.create(applicationContext).registerPushToken(
                     "Bearer ${session.token}",
                     RegisterPushTokenRequest(token)
                 )

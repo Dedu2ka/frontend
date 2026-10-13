@@ -21,7 +21,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.olo.data.ConnectionStatus
 import java.time.Instant
+import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -35,6 +37,12 @@ data class MessageUiItem(
     val status: String? = null
 )
 
+private data class ChatTimelineItem(
+    val key: String,
+    val message: MessageUiItem? = null,
+    val dateLabel: String? = null
+)
+
 @Composable
 fun ChatScreen(
     currentUserId: String,
@@ -43,7 +51,11 @@ fun ChatScreen(
     messages: List<MessageUiItem>,
     onSendMessage: (String) -> Unit,
     onNavigateToSettings: () -> Unit,
-    onNavigateToSearch: () -> Unit
+    onNavigateToSearch: () -> Unit,
+    connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
+    hasOlderMessages: Boolean = false,
+    loadingOlderMessages: Boolean = false,
+    onLoadOlderMessages: () -> Unit = {}
 ) {
     var textInput by remember { mutableStateOf("") }
 
@@ -59,6 +71,23 @@ fun ChatScreen(
     }
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val messageListState = rememberLazyListState()
+    val timelineItems = remember(messages) {
+        val newestFirst = messages.asReversed()
+        buildList {
+            newestFirst.forEachIndexed { index, message ->
+                add(ChatTimelineItem(key = "message-${message.id}", message = message))
+                val nextOlder = newestFirst.getOrNull(index + 1)
+                if (nextOlder == null || messageLocalDate(message.timestamp) != messageLocalDate(nextOlder.timestamp)) {
+                    add(ChatTimelineItem(key = "date-${messageLocalDate(message.timestamp) ?: message.id}", dateLabel = formatMessageDate(message.timestamp)))
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(messageListState.firstVisibleItemIndex, messageListState.layoutInfo.totalItemsCount, hasOlderMessages, loadingOlderMessages) {
+        if (hasOlderMessages && !loadingOlderMessages && messages.isNotEmpty() &&
+            messageListState.firstVisibleItemIndex >= messageListState.layoutInfo.totalItemsCount - 4) onLoadOlderMessages()
+    }
 
     LaunchedEffect(messages.lastOrNull()?.id) {
         if (messages.isNotEmpty()) {
@@ -121,6 +150,7 @@ fun ChatScreen(
                     Text(chatPartnerName, color = Color.White, fontSize = 16.sp)
                 }
             }
+            ConnectionStatusBanner(connectionStatus, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
 
             // Message list
             LazyColumn(
@@ -132,7 +162,17 @@ fun ChatScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.Bottom),
                 reverseLayout = true
             ) {
-                items(messages.reversed(), key = { it.id }) { msg ->
+                items(timelineItems, key = { it.key }) { entry ->
+                    val msg = entry.message
+                    if (msg == null) {
+                        Text(
+                            text = entry.dateLabel.orEmpty(),
+                            color = Color(0xFFBFC3FF),
+                            fontSize = 12.sp,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    } else {
                     val isMyMessage = msg.senderId == currentUserId
 
                     Box(
@@ -170,7 +210,9 @@ fun ChatScreen(
                             }
                         }
                     }
+                    }
                 }
+                if (loadingOlderMessages) item { Text("Загружаем…", color = Color.LightGray, modifier = Modifier.fillMaxWidth()) }
             }
 
             // Input bar
@@ -222,6 +264,24 @@ private fun formatMessageTime(timestamp: String?): String? {
         .getOrNull() ?: return null
     return DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
         .format(instant.atZone(ZoneId.systemDefault()))
+}
+
+private fun messageLocalDate(timestamp: String?): LocalDate? {
+    if (timestamp.isNullOrBlank()) return null
+    val instant = runCatching { Instant.parse(timestamp) }
+        .recoverCatching { OffsetDateTime.parse(timestamp).toInstant() }
+        .getOrNull() ?: return null
+    return instant.atZone(ZoneId.systemDefault()).toLocalDate()
+}
+
+private fun formatMessageDate(timestamp: String?): String {
+    val date = messageLocalDate(timestamp) ?: return "Без даты"
+    val today = LocalDate.now(ZoneId.systemDefault())
+    return when (date) {
+        today -> "Сегодня"
+        today.minusDays(1) -> "Вчера"
+        else -> DateTimeFormatter.ofPattern("d MMMM yyyy", Locale.getDefault()).format(date)
+    }
 }
 
 @Composable

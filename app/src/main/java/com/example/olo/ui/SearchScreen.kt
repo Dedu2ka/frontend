@@ -19,8 +19,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.time.Instant
+import java.time.LocalDate
+import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import coil.compose.AsyncImage
 import com.example.olo.data.ChatDto
+import com.example.olo.data.ConnectionStatus
 
 data class UserItem(
     val id: String,
@@ -33,6 +40,8 @@ data class UserItem(
 fun SearchScreen(
     userList: List<UserItem>,
     chatList: List<ChatDto>,
+    currentUserId: String,
+    connectionStatus: ConnectionStatus,
     onSearchQueryChange: (String) -> Unit,
     onUserClick: (UserItem) -> Unit,
     onChatClick: (String) -> Unit,
@@ -84,6 +93,8 @@ fun SearchScreen(
             )
 
             Spacer(modifier = Modifier.height(16.dp))
+            ConnectionStatusBanner(connectionStatus)
+            Spacer(modifier = Modifier.height(12.dp))
 
             if (searchQuery.isBlank()) {
                 // Список существующих чатов
@@ -92,6 +103,16 @@ fun SearchScreen(
 
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     items(chatList) { chat ->
+                        val messagePreview = chat.lastMessage?.takeIf { it.isNotBlank() }?.let { content ->
+                            val sender = when (chat.lastMessageSenderId) {
+                                currentUserId -> "Вы"
+                                null -> null
+                                else -> (chat.partnerDisplayName?.trim()?.takeIf(String::isNotBlank)
+                                    ?: chat.partnerUsername?.trim()?.takeIf(String::isNotBlank)
+                                    ?: chat.partnerName.orEmpty()).take(4)
+                            }
+                            if (sender == null) content else "$sender: $content"
+                        } ?: "Нет сообщений"
                         val chatAvatarBitmap = remember(chat.partnerAvatarUrl) {
                             if (!chat.partnerAvatarUrl.isNullOrBlank()) decodeBase64ToBitmap(chat.partnerAvatarUrl) else null
                         }
@@ -140,14 +161,18 @@ fun SearchScreen(
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = chat.lastMessage?.takeIf { it.isNotBlank() } ?: "Нет сообщений",
+                                    text = messagePreview,
                                     color = Color.Gray,
                                     fontSize = 13.sp,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
-                            if (chat.unreadCount > 0) {
+                            Column(horizontalAlignment = Alignment.End) {
+                                formatChatPreviewTime(chat.lastMessageAt)?.let { time ->
+                                    Text(time, color = Color.Gray, fontSize = 11.sp, maxLines = 1)
+                                }
+                                if (chat.unreadCount > 0) {
                                 Box(
                                     modifier = Modifier
                                         .padding(start = 8.dp)
@@ -162,6 +187,7 @@ fun SearchScreen(
                                         fontSize = 11.sp,
                                         maxLines = 1
                                     )
+                                }
                                 }
                             }
                         }
@@ -236,4 +262,14 @@ fun SearchScreen(
             }
         }
     }
+}
+
+private fun formatChatPreviewTime(timestamp: String?): String? {
+    if (timestamp.isNullOrBlank()) return null
+    val instant = runCatching { Instant.parse(timestamp) }
+        .recoverCatching { OffsetDateTime.parse(timestamp).toInstant() }
+        .getOrNull() ?: return null
+    val localDateTime = instant.atZone(ZoneId.systemDefault())
+    val pattern = if (localDateTime.toLocalDate() == LocalDate.now(ZoneId.systemDefault())) "HH:mm" else "dd.MM.yyyy"
+    return DateTimeFormatter.ofPattern(pattern, Locale.getDefault()).format(localDateTime)
 }
